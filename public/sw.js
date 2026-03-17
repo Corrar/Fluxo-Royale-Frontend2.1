@@ -1,90 +1,74 @@
-// public/sw.js
+// ficheiro: public/sw.js
+import { precacheAndRoute, createHandlerBoundToURL } from 'workbox-precaching';
+import { NavigationRoute, registerRoute } from 'workbox-routing';
 
-// Altera o nome do cache para forçar a atualização imediata nos clientes
-const CACHE_NAME = 'fluxo-royale-v2';
+const CACHE_NAME = 'fluxo-royale-api-cache-v3';
 
-// Ficheiros mínimos para a app abrir sem internet
-const ASSETS_TO_CACHE = [
-  '/',
-  '/index.html',
-  '/favicon.png',
-  '/manifest.json',
-  '/logo-royale.png'
-];
+// 1. ✨ PRÉ-CACHE MÁGICO: O VitePWA injeta aqui todos os ficheiros (HTML, JS, CSS, Imagens)
+// Isto resolve a TELA PRETA. O código das abas já vai estar guardado aqui!
+precacheAndRoute(self.__WB_MANIFEST || []);
+
+// 2. ✨ ROTA SPA: Garante que as abas e o botão "Atualizar" funcionem offline
+try {
+  const handler = createHandlerBoundToURL('/index.html');
+  const navigationRoute = new NavigationRoute(handler, {
+    denylist: [new RegExp('^/api/')] // Não aplica isto a chamadas de base de dados
+  });
+  registerRoute(navigationRoute);
+} catch (e) {
+  console.warn('Aviso: Navegação offline não configurada.', e);
+}
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS_TO_CACHE))
-  );
-  // Obriga o novo Service Worker a instalar imediatamente
   self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
-  event.waitUntil(
-    caches.keys().then((cacheNames) => {
-      // Apaga caches antigos (ex: v1) para não haver conflitos
-      return Promise.all(
-        cacheNames.filter((name) => name !== CACHE_NAME).map((name) => caches.delete(name))
-      );
-    })
-  );
-  // Assume o controlo das abas abertas imediatamente
   event.waitUntil(self.clients.claim());
 });
 
-// =========================================================================
-// 🔥 OUVINTE DE FETCH: REDE PRIMEIRO, CACHE DEPOIS (Network-First)
-// =========================================================================
+// 3. ✨ INTERCETOR DA API: Guarda apenas os dados do backend
 self.addEventListener('fetch', (event) => {
+  // Só intercetamos tentativas de ler dados (GET)
+  if (event.request.method !== 'GET') return;
+
   const url = new URL(event.request.url);
 
-  // 1. BYPASS COMPLETO PARA O VITE E API
-  if (
-    url.pathname.startsWith('/api/') || 
-    url.pathname.startsWith('/@vite/') || 
-    url.pathname.startsWith('/@fs/') || 
-    url.pathname.startsWith('/@react-refresh') || 
-    url.pathname.startsWith('/src/') || 
-    url.pathname.includes('node_modules') ||
-    url.hostname === 'localhost' || 
-    url.hostname === '127.0.0.1' 
-  ) {
-    return; // Deixa passar direto
+  // Define o que é uma chamada de API (para a nossa Base de Dados)
+  // Ignora ficheiros locais, imagens e scripts (o código lá em cima já tratou deles!)
+  const isApi = url.pathname.startsWith('/api') || 
+                (url.hostname !== self.location.hostname && !url.hostname.includes('vite') && !url.hostname.includes('localhost'));
+
+  if (!isApi) {
+    return; // Passa o controlo de volta para o navegador carregar as abas normalmente
   }
 
-  // 2. ESTRATÉGIA NETWORK-FIRST (Rede primeiro, fallback para offline)
+  // Tenta ir à internet buscar os dados novos. Se falhar, vai ao cofre!
   event.respondWith(
     fetch(event.request)
       .then((networkResponse) => {
-        // Se a internet funcionou e a resposta é válida, atualiza o cofre!
-        if (networkResponse && networkResponse.status === 200 && networkResponse.type === 'basic') {
+        if (networkResponse && networkResponse.status === 200) {
           const responseToCache = networkResponse.clone();
-          caches.open(CACHE_NAME).then((cache) => {
-            if(event.request.url.startsWith('http')) {
-               cache.put(event.request, responseToCache);
-            }
-          });
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, responseToCache));
         }
-        return networkResponse; // Devolve a versão mais recente ao utilizador!
+        return networkResponse;
       })
       .catch(async () => {
-        // 3. SE A INTERNET FALHAR (OFFLINE), VAI BUSCAR AO COFRE!
         const cachedResponse = await caches.match(event.request);
         if (cachedResponse) {
-          return cachedResponse; // Devolve o ficheiro guardado offline
+          return cachedResponse;
         }
-        
-        // Se for uma navegação de página que falhou, mostra o index.html (PWA)
-        if (event.request.mode === 'navigate') {
-          return caches.match('/index.html');
-        }
+        // Se falhar a net e não houver cache, devolvemos um array vazio para a tela não dar erro
+        return new Response(JSON.stringify({ error: 'Offline', data: [] }), { 
+          status: 503, 
+          headers: { 'Content-Type': 'application/json' } 
+        });
       })
   );
 });
 
 // =========================================================================
-// 🔥 OUVINTE DE PUSH E CLIQUE (Notificações)
+// 🔥 OUVINTE DE PUSH E CLIQUE (Notificações) - Intacto e Funcional!
 // =========================================================================
 self.addEventListener('push', (event) => {
   let data = { title: 'Nova Solicitação', body: 'Há um novo pedido no almoxarifado.', url: '/requests' };
