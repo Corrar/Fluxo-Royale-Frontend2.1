@@ -63,7 +63,7 @@ export function TravelModal({ isOpen, onClose, onSave, onDelete, onArchive, edit
   const [reportClientName, setReportClientName] = useState("");
   const [reportCompany, setReportCompany] = useState("");
   const [reportObservations, setReportObservations] = useState("");
-  const [showMobilePreview, setShowMobilePreview] = useState(false); // ✨ Controle de Visualização Mobile
+  const [showMobilePreview, setShowMobilePreview] = useState(false);
 
   const [attachments, setAttachments] = useState<{id: string, name: string, url: string, addedAt: string}[]>([]);
   const [comments, setComments] = useState<any[]>([]);
@@ -114,10 +114,26 @@ export function TravelModal({ isOpen, onClose, onSave, onDelete, onArchive, edit
       setMobileChatView("list");
       setExpandedLogId(null);
       setShowMobilePreview(false);
-      api.get('/users').then((res) => {
-        setTravelers(res.data);
-        setAssignTechId('');
-      }).catch(() => {});
+
+      // ✨ MAGIA OFFLINE: BUSCA DE UTILIZADORES COM FALLBACK
+      const loadTravelers = async () => {
+        if (!navigator.onLine) {
+          const cachedUsers = localStorage.getItem('@FluxoRoyale:users');
+          if (cachedUsers) setTravelers(JSON.parse(cachedUsers));
+          return;
+        }
+        try {
+          const res = await api.get('/users');
+          setTravelers(res.data);
+          localStorage.setItem('@FluxoRoyale:users', JSON.stringify(res.data));
+          setAssignTechId('');
+        } catch (error) {
+          const cachedUsers = localStorage.getItem('@FluxoRoyale:users');
+          if (cachedUsers) setTravelers(JSON.parse(cachedUsers));
+        }
+      };
+      
+      loadTravelers();
 
       if (editingCard) {
         setTitle(editingCard.title || '');
@@ -140,7 +156,8 @@ export function TravelModal({ isOpen, onClose, onSave, onDelete, onArchive, edit
         (editingCard.checklists || []).forEach((g: any) => { expandedState[g.id] = true });
         setExpandedGroups(expandedState);
 
-        if (editingCard.id) {
+        // ✨ MAGIA OFFLINE: SÓ ATUALIZA COM DADOS MAIS RECENTES SE ESTIVER ONLINE
+        if (editingCard.id && navigator.onLine) {
           api.get(`/travels/${editingCard.id}`).then((res) => {
             const data = res.data;
             setChecklists(data.checklists || []);
@@ -157,7 +174,7 @@ export function TravelModal({ isOpen, onClose, onSave, onDelete, onArchive, edit
     }
   }, [isOpen, editingCard]);
 
-  // TEMPO REAL INVISÍVEL NO MODAL
+  // TEMPO REAL INVISÍVEL NO MODAL (Via Sockets - só funciona online)
   useEffect(() => {
     if (!socket || !isOpen || !editingCard?.id) return;
 
@@ -180,8 +197,15 @@ export function TravelModal({ isOpen, onClose, onSave, onDelete, onArchive, edit
 
   const openLog = timeLogs.find((l: any) => l.user_id === myId && !l.check_out);
 
+  // ✨ MAGIA OFFLINE: REVERSE GEOCODING PROTEGIDO
   useEffect(() => {
     if (activeTab === 'time' && openLog && openLog.check_in_lat && openLog.check_in_lng) {
+      
+      if (!navigator.onLine) {
+         setLocationAddress({ city: 'GPS Registado', state: 'Modo Offline', postcode: 'Guardado' });
+         return;
+      }
+
       fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${openLog.check_in_lat}&lon=${openLog.check_in_lng}&zoom=18&addressdetails=1`, {
         headers: { 'Accept-Language': 'pt-BR' }
       })
@@ -682,7 +706,6 @@ export function TravelModal({ isOpen, onClose, onSave, onDelete, onArchive, edit
               <Timer className="w-4 h-4" /> Relógio de Ponto
             </button>
             
-            {/* ✨ NOVO BOTÃO DE RELATÓRIO ✨ */}
             <button onClick={() => setActiveTab('report')} className={`px-5 py-2.5 text-[13px] md:text-sm font-extrabold rounded-full transition-all flex items-center gap-2 whitespace-nowrap snap-start ${activeTab === 'report' ? 'bg-foreground text-background shadow-md' : 'bg-muted/50 text-muted-foreground hover:bg-muted hover:text-foreground'}`}>
               <FileText className="w-4 h-4" /> Relatório
             </button>
@@ -1173,11 +1196,9 @@ export function TravelModal({ isOpen, onClose, onSave, onDelete, onArchive, edit
             </div>
           )}
 
-          {/* ✨ NOVA ABA DE RELATÓRIO (HÍBRIDA MOBILE/DESKTOP) ✨ */}
           {activeTab === 'report' && (
             <div className="flex-1 flex flex-col h-full bg-muted/5 overflow-y-auto p-4 md:p-10">
               
-              {/* ✨ ECRÃ MOBILE: MOSTRA SÓ OS CAMPOS E O BOTÃO DE VISUALIZAR ✨ */}
               {!showMobilePreview && (
                 <div className="flex flex-col md:hidden space-y-6 pb-8">
                   <div>
@@ -1211,10 +1232,8 @@ export function TravelModal({ isOpen, onClose, onSave, onDelete, onArchive, edit
                 </div>
               )}
 
-              {/* ✨ ECRÃ PC OU MODO PREVIEW NO MOBILE ✨ */}
               <div className={`flex-col md:flex-row gap-8 h-full ${!showMobilePreview ? 'hidden md:flex' : 'flex'}`}>
                 
-                {/* Lado Esquerdo (Fixo no PC, Oculto no Preview Mobile) */}
                 <div className="hidden md:flex md:w-1/3 lg:w-[320px] flex-col space-y-6 shrink-0">
                   <div>
                     <h3 className="text-xl font-black text-foreground">Configurar Relatório</h3>
@@ -1241,10 +1260,8 @@ export function TravelModal({ isOpen, onClose, onSave, onDelete, onArchive, edit
                   </Button>
                 </div>
 
-                {/* Área do Papel A4 */}
                 <div className="flex-1 bg-muted/20 md:border md:border-border/40 shadow-inner md:rounded-[2rem] overflow-y-auto flex flex-col justify-start items-center custom-scrollbar relative p-0 md:p-10 -mx-4 md:mx-0">
                   
-                  {/* Botões do Topo (Só aparecem no Mobile Preview) */}
                   {showMobilePreview && (
                     <div className="w-full flex justify-between items-center mb-4 md:hidden sticky top-0 bg-background/90 backdrop-blur-xl z-20 py-3 px-4 border-b border-border/30 shadow-sm">
                       <button onClick={() => setShowMobilePreview(false)} className="flex items-center gap-1 text-[13px] font-bold text-muted-foreground hover:text-foreground">
@@ -1256,11 +1273,9 @@ export function TravelModal({ isOpen, onClose, onSave, onDelete, onArchive, edit
                     </div>
                   )}
 
-                  {/* O Papel A4 Responsivo (Escala automaticamente no Mobile) */}
                   <div className="w-full overflow-x-auto pb-6 px-4 md:px-0 flex justify-center custom-scrollbar">
                     <div id="printable-report" className="bg-white text-black p-8 md:p-14 w-full max-w-[21cm] min-h-[29.7cm] shadow-2xl relative shrink-0">
                       
-                      {/* Cabeçalho */}
                       <div className="flex justify-between items-start border-b-2 border-black pb-6 mb-8">
                         <img src={`${window.location.origin}/logo-royale.png`} alt="Royale" className="h-12 md:h-16 object-contain" />
                         <div className="text-right">
@@ -1270,7 +1285,6 @@ export function TravelModal({ isOpen, onClose, onSave, onDelete, onArchive, edit
                         </div>
                       </div>
 
-                      {/* Dados do Cliente */}
                       <div className="mb-8">
                         <h2 className="text-[11px] md:text-[13px] font-black uppercase tracking-widest border-b-2 border-gray-100 pb-2 mb-4 text-gray-800">Dados do Cliente</h2>
                         <p className="text-xs md:text-sm mb-2"><strong className="text-black">Cliente / Contato:</strong> {reportClientName || '________________________________________'}</p>
@@ -1278,7 +1292,6 @@ export function TravelModal({ isOpen, onClose, onSave, onDelete, onArchive, edit
                         <p className="text-xs md:text-sm"><strong className="text-black">Técnico Responsável:</strong> {profile?.name || 'Equipa Técnica'}</p>
                       </div>
 
-                      {/* Checklist */}
                       <div className="mb-8">
                         <h2 className="text-[11px] md:text-[13px] font-black uppercase tracking-widest border-b-2 border-gray-100 pb-2 mb-4 text-gray-800">Tarefas Registadas</h2>
                         {checklists.length > 0 ? (
@@ -1309,7 +1322,6 @@ export function TravelModal({ isOpen, onClose, onSave, onDelete, onArchive, edit
                         )}
                       </div>
 
-                      {/* Observações */}
                       <div className="mb-10">
                         <h2 className="text-[11px] md:text-[13px] font-black uppercase tracking-widest border-b-2 border-gray-100 pb-2 mb-4 text-gray-800">Observações e Notas Técnicas</h2>
                         <div className="border border-dashed border-gray-400 p-4 md:p-5 rounded-xl min-h-[100px] md:min-h-[120px] bg-gray-50 text-xs md:text-sm text-gray-800 whitespace-pre-wrap">
@@ -1317,7 +1329,6 @@ export function TravelModal({ isOpen, onClose, onSave, onDelete, onArchive, edit
                         </div>
                       </div>
 
-                      {/* Assinaturas */}
                       <div className="mt-16 md:mt-24 flex flex-col md:flex-row justify-between gap-10">
                         <div className="flex-1 border-t border-black pt-3 text-center">
                           <p className="font-bold text-xs md:text-sm text-black uppercase tracking-wider">Assinatura do Técnico</p>
