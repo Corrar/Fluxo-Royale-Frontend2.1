@@ -419,18 +419,36 @@ export default function TravelBoard() {
   const [touchStart, setTouchStart] = useState<{x: number, y: number} | null>(null);
   const [touchEnd, setTouchEnd] = useState<{x: number, y: number} | null>(null);
 
-  // ✨ CORREÇÃO: Função Polling de Utilizadores para ver sempre quem entrou em turno (A cada 10s)
+  // ✨ MAGIA OFFLINE AQUI: Garantimos que o sistema lê do cache se estiver sem internet!
   useEffect(() => {
-    const fetchTeamStatus = () => {
-      api.get('/users')
-         .then((res) => {
-           if (res.data) setUsers(res.data);
-         })
-         .catch(() => {});
+    const fetchTeamStatus = async () => {
+      // Se não há internet, carrega direto da cache e aborta!
+      if (!navigator.onLine) {
+         const cachedUsers = localStorage.getItem('@FluxoRoyale:users');
+         if (cachedUsers) setUsers(JSON.parse(cachedUsers));
+         return;
+      }
+
+      // Se há internet, vai buscar atualizado e guarda no cofre.
+      try {
+        const res = await api.get('/users');
+        if (res.data) {
+          setUsers(res.data);
+          localStorage.setItem('@FluxoRoyale:users', JSON.stringify(res.data));
+        }
+      } catch (error) {
+        // Se a chamada falhar (ex: rede caiu no meio), tenta usar a cache
+        const cachedUsers = localStorage.getItem('@FluxoRoyale:users');
+        if (cachedUsers) setUsers(JSON.parse(cachedUsers));
+      }
     };
 
     fetchTeamStatus();
-    const teamInterval = setInterval(fetchTeamStatus, 10000);
+    
+    // Só tenta fazer polling em background se a internet estiver ligada para não floodar a console com erros!
+    const teamInterval = setInterval(() => {
+      if (navigator.onLine) fetchTeamStatus();
+    }, 10000);
 
     return () => clearInterval(teamInterval);
   }, []);
