@@ -61,16 +61,16 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   // 🔔 LÓGICA DE NOTIFICAÇÕES PUSH (ROBUSTA)
   // ========================================================================
   const setupPushNotifications = async (userProfile: Profile) => {
-    // Apenas Almoxarifes e Admins precisam receber alertas
+    // Se não houver internet, ignoramos para não causar erros de rede
+    if (!navigator.onLine) return;
+
     if (userProfile.role !== 'almoxarife' && userProfile.role !== 'admin') return;
 
     try {
       if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
 
-      // Aguarda o Service Worker estar pronto (registrado no App.tsx)
       const registration = await navigator.serviceWorker.ready;
       
-      // Verifica permissão atual
       let permission = Notification.permission;
       if (permission === 'default') {
         permission = await Notification.requestPermission();
@@ -81,13 +81,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      // Obtém a chave pública VAPID do servidor
       const { data } = await api.get("/notifications/push-key");
       const publicKey = data.publicKey;
 
       if (!publicKey) throw new Error("Chave VAPID pública não encontrada.");
 
-      // Tenta recuperar subscrição existente ou cria uma nova
       let subscription = await registration.pushManager.getSubscription();
 
       if (!subscription) {
@@ -97,7 +95,6 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         });
       }
 
-      // Envia a subscrição para o backend salvar
       await api.post("/notifications/subscribe", {
         profileId: userProfile.id,
         subscription
@@ -111,19 +108,27 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // --- BUSCAR PERMISSÕES ---
   const fetchUserPermissions = async (role: string) => {
+    // Se estiver offline, devolvemos o que já está guardado!
+    if (!navigator.onLine) {
+       const saved = localStorage.getItem("user_permissions");
+       return saved ? JSON.parse(saved) : [];
+    }
+
     try {
       const response = await api.get("/admin/permissions");
       const myPermissions = response.data[role] || [];
       setPermissions(myPermissions);
       localStorage.setItem("user_permissions", JSON.stringify(myPermissions));
       return myPermissions;
-    } catch (error) {
+    } catch (error: any) {
       console.error("Erro ao buscar permissões:", error);
-      return [];
+      // Proteção extra: se a API falhar (ex: servidor caiu), mantemos as locais
+      const saved = localStorage.getItem("user_permissions");
+      return saved ? JSON.parse(saved) : [];
     }
   };
 
-  // 🔥 CARREGAR SESSÃO NO F5
+  // 🔥 CARREGAR SESSÃO NO F5 (AGORA À PROVA DE BALAS PARA OFFLINE)
   useEffect(() => {
     const loadSession = async () => {
       const token = localStorage.getItem("auth_token");
@@ -136,26 +141,30 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           api.defaults.headers.Authorization = `Bearer ${token}`;
           const parsedProfile = JSON.parse(savedProfile);
 
+          // 1. Aplica IMEDIATAMENTE os dados guardados (Login Offline)
           setUser(JSON.parse(savedUser));
           setProfile(parsedProfile);
           
-          // Tenta reativar as notificações silenciosamente ao recarregar a página
-          setupPushNotifications(parsedProfile);
-          
           if (savedPermissions) {
              setPermissions(JSON.parse(savedPermissions));
-             // Atualiza permissões em background para garantir sincronia
-             fetchUserPermissions(parsedProfile.role); 
-          } else {
-             await fetchUserPermissions(parsedProfile.role);
           }
+
+          // 2. Tenta fazer as atualizações em background APENAS se houver internet
+          if (navigator.onLine) {
+             setupPushNotifications(parsedProfile).catch(() => {});
+             fetchUserPermissions(parsedProfile.role).then(perms => {
+                 if (perms.length > 0) setPermissions(perms);
+             }).catch(() => {});
+          }
+
         } catch (error) {
-          console.error("Erro ao restaurar sessão:", error);
-          localStorage.clear();
+          console.error("Erro crítico ao restaurar sessão (parse falhou):", error);
+          // Removemos o localStorage.clear() daqui para não te expulsar atoa!
         }
       }
       setLoading(false);
     };
+    
     loadSession();
   }, []);
 
@@ -164,7 +173,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     let intervalId: NodeJS.Timeout;
     if (user && profile) {
       const sendHeartbeat = async () => {
-        if (isHeartbeatRunning.current) return;
+        // Se estiver offline, nem tenta enviar o pulso para não acumular erros
+        if (!navigator.onLine || isHeartbeatRunning.current) return;
+        
         isHeartbeatRunning.current = true;
         try {
           await api.put(`/users/${profile.id}/heartbeat`, {}, { skipLoading: true } as any);
@@ -194,6 +205,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   // 🔥 LOGIN
   const signIn = async (id: string, password: string) => {
+    if (!navigator.onLine) {
+      return { error: { message: "Precisas de internet para fazer login a primeira vez." } };
+    }
+
     setLoading(true);
     try {
       const email = id.includes("@") ? id.trim().toLowerCase() : `${id.trim().toLowerCase()}@fluxoroyale.local`;
