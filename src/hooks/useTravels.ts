@@ -96,37 +96,67 @@ export function useTravels() {
   // =========================================================================
 
   const createTravel = async (title: string, description: string, priority?: string, checklists?: any[], tags?: any[], imageUrl?: string, dueDate?: Date, listId?: string) => {
+    // 🚀 OTIMISTA: Cria um ID temporário e mostra o cartão na tela imediatamente!
+    const tempId = crypto.randomUUID ? crypto.randomUUID() : `temp-${Date.now()}`;
+    const newTravel: any = {
+      id: tempId,
+      title, description, priority, checklists, tags, imageUrl, dueDate, 
+      listId: listId || 'Pendente',
+      status: listId || 'Pendente',
+      created_by: profile?.id,
+      technicians: []
+    };
+
+    setTravels(prev => [...prev, newTravel]);
+
     try {
       const payload = { title, description, priority, checklists, tags, imageUrl, dueDate, listId };
       const res = await apiWithOfflineFallback('POST', '/travels', payload, 'geral', 'nova');
       
-      if (res.offline) toast.info('Viagem guardada offline. Será criada assim que a internet voltar!');
-      else toast.success('Viagem criada com sucesso!');
-      
-      fetchTravels(); 
+      if (res.offline) {
+        toast.info('Viagem guardada offline. Será criada assim que a internet voltar!');
+      } else {
+        toast.success('Viagem criada com sucesso!');
+        fetchTravels(); // Só vai buscar ao servidor se tiver internet
+      }
     } catch (error) {
       toast.error('Erro ao criar a viagem.');
+      setTravels(prev => prev.filter(t => t.id !== tempId)); // Reverte visualmente se der erro
     }
   };
 
   const updateTravel = async (id: string, updates: Partial<Travel>) => {
+    // 🚀 OTIMISTA: Atualiza o texto na tela imediatamente
+    setTravels(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t));
+
     try {
       const res = await apiWithOfflineFallback('PUT', `/travels/${id}`, updates, 'geral', id);
-      if (res.offline) toast.info('Atualizações guardadas offline.');
-      fetchTravels();
+      if (res.offline) {
+        toast.info('Atualizações guardadas offline.');
+      } else {
+        fetchTravels(); // Só atualiza a lista se estiver online
+      }
     } catch (error) {
       toast.error('Erro ao atualizar a viagem.');
+      fetchTravels(); // Reverte
     }
   };
 
   const deleteTravel = async (id: string) => {
+    // 🚀 OTIMISTA: Remove o cartão da tela imediatamente
+    setTravels(prev => prev.filter(t => t.id !== id));
+
     try {
       const res = await apiWithOfflineFallback('DELETE', `/travels/${id}`, {}, 'geral', id);
-      if (res.offline) toast.info('Eliminação agendada (Modo Offline).');
-      else toast.success('Viagem excluída com sucesso.');
-      fetchTravels();
+      if (res.offline) {
+        toast.info('Eliminação agendada (Modo Offline).');
+      } else {
+        toast.success('Viagem excluída com sucesso.');
+        fetchTravels();
+      }
     } catch (error) {
       toast.error('Erro ao excluir a viagem.');
+      fetchTravels(); // Reverte
     }
   };
 
@@ -145,8 +175,9 @@ export function useTravels() {
 
   const assignTraveler = async (travelId: string, userId: string) => {
     try {
-      await apiWithOfflineFallback('POST', `/travels/${travelId}/technicians`, { user_id: userId }, 'geral', travelId);
-      fetchTravels();
+      const res = await apiWithOfflineFallback('POST', `/travels/${travelId}/technicians`, { user_id: userId }, 'geral', travelId);
+      if (res.offline) toast.info('Atribuição guardada offline.');
+      if (!res.offline) fetchTravels(); // Evita recarregar a tela atoa se estiver offline
     } catch (error) {
       toast.error('Erro ao adicionar o viajante.');
     }
@@ -154,8 +185,9 @@ export function useTravels() {
 
   const removeTraveler = async (travelId: string, userId: string) => {
     try {
-      await apiWithOfflineFallback('DELETE', `/travels/${travelId}/technicians/${userId}`, {}, 'geral', travelId);
-      fetchTravels();
+      const res = await apiWithOfflineFallback('DELETE', `/travels/${travelId}/technicians/${userId}`, {}, 'geral', travelId);
+      if (res.offline) toast.info('Remoção guardada offline.');
+      if (!res.offline) fetchTravels();
     } catch (error) {
       toast.error('Erro ao remover o viajante.');
     }
