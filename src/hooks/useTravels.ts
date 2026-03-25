@@ -6,8 +6,8 @@ import { useAuth } from '../contexts/AuthContext';
 import { Travel } from '../types/travel';
 import { toast } from 'sonner';
 import { useSocket } from '../contexts/SocketContext';
-// ✨ IMPORTAÇÃO DA MAGIA OFFLINE
-import { apiWithOfflineFallback } from '../utils/offlineSync';
+// ✨ IMPORTAÇÃO DA MAGIA OFFLINE E DO COFRE
+import { apiWithOfflineFallback, getOfflineActions } from '../utils/offlineSync';
 
 export function useTravels() {
   const { profile, canAccess } = useAuth();
@@ -22,48 +22,87 @@ export function useTravels() {
   const isAdminOrLeader = profile?.role === 'admin' || (canAccess('viagens_externas') && !isTecnico);
 
   // =========================================================================
-  // 1. FUNÇÃO PARA BUSCAR E FILTRAR (COM CACHE OFFLINE)
+  // ✨ FUNÇÃO MESTRA: ATUALIZA TELA E LOCALSTORAGE EM SIMULTÂNEO
+  // =========================================================================
+  const updateLocalTravels = useCallback((updater: (prev: Travel[]) => Travel[]) => {
+    setTravels(prev => {
+      const nextState = updater(prev);
+      // Guarda imediatamente a versão mais recente no telemóvel para aguentar o F5!
+      localStorage.setItem('@FluxoRoyale:travels', JSON.stringify(nextState));
+      return nextState;
+    });
+  }, []);
+
+  // =========================================================================
+  // 1. FUNÇÃO PARA BUSCAR E FILTRAR (COM ESCUDO OFFLINE)
   // =========================================================================
   const fetchTravels = useCallback(async () => {
+    // 🛡️ PROTEÇÃO CRÍTICA: Não carrega viagens sem saber quem é o utilizador! (Evita tela limpa no F5)
+    if (!profile) return; 
+
     try {
+      // 🛡️ ESCUDO: Se estamos offline ou temos coisas no cofre, usamos SÓ os dados locais!
+      const pendingActions = await getOfflineActions();
+      const hasPending = pendingActions.some(a => a.url.includes('/travels'));
+
+      if (!navigator.onLine || hasPending) {
+        const cachedData = localStorage.getItem('@FluxoRoyale:travels');
+        if (cachedData) {
+           let parsed = JSON.parse(cachedData);
+           
+           // ✨ CORREÇÃO CRÍTICA: Filtragem usando String() para evitar que os cartões desapareçam
+           if (!isAdminOrLeader) {
+             parsed = parsed.filter((travel: any) => {
+               const isAssigned = travel.technicians?.some((tech: any) => String(tech.user_id) === String(profile?.id));
+               const isCreator = String(travel.created_by) === String(profile?.id);
+               return isAssigned || isCreator;
+             });
+           }
+           setTravels(parsed);
+        }
+        setLoading(false);
+        return; // ABORTA A CHAMADA À API PARA NÃO LER CACHE VELHO E PERDER AS TAREFAS!
+      }
+
+      // Se há internet E o cofre está vazio, busca dados frescos do servidor:
       const response = await api.get('/travels');
       let allTravels: Travel[] = response.data;
 
+      // ✨ CORREÇÃO CRÍTICA ONLINE: Mesma lógica de segurança com String()
       if (!isAdminOrLeader) {
         allTravels = allTravels.filter(travel => {
           const isAssigned = travel.technicians?.some(
-            (tech: any) => tech.user_id === profile?.id
+            (tech: any) => String(tech.user_id) === String(profile?.id)
           );
-          const isCreator = travel.created_by === profile?.id;
+          const isCreator = String(travel.created_by) === String(profile?.id);
           return isAssigned || isCreator;
         });
       }
 
       setTravels(allTravels);
-      
-      // ✨ GUARDA A "FOTOGRAFIA" MAIS RECENTE NO TELEMÓVEL
       localStorage.setItem('@FluxoRoyale:travels', JSON.stringify(allTravels));
 
     } catch (error: any) {
-      // ✨ SE FALHAR A INTERNET, VAI BUSCAR A FOTOGRAFIA
-      if (!navigator.onLine || error.message === 'Network Error') {
-        const cachedData = localStorage.getItem('@FluxoRoyale:travels');
-        if (cachedData) {
-           setTravels(JSON.parse(cachedData));
-           toast.warning('Modo Offline: A mostrar dados guardados no dispositivo.', { duration: 4000 });
-        } else {
-           toast.error('Sem internet e sem dados guardados. Conecte-se para sincronizar.');
-        }
+      // ✨ SEGURANÇA EXTRA: Se o servidor falhar, também usamos a cache com a correção String()
+      const cachedData = localStorage.getItem('@FluxoRoyale:travels');
+      if (cachedData) {
+         let parsed = JSON.parse(cachedData);
+         if (!isAdminOrLeader) {
+           parsed = parsed.filter((travel: any) => {
+             const isAssigned = travel.technicians?.some((tech: any) => String(tech.user_id) === String(profile?.id));
+             const isCreator = String(travel.created_by) === String(profile?.id);
+             return isAssigned || isCreator;
+           });
+         }
+         setTravels(parsed);
       } else {
-        toast.error('Erro ao buscar as viagens.');
-        console.error(error);
+         toast.error('Erro ao buscar as viagens.');
       }
     } finally {
       setLoading(false);
     }
   }, [profile, isAdminOrLeader]);
 
-  // Busca inicial
   useEffect(() => {
     if (profile) {
       setLoading(true);
@@ -71,120 +110,103 @@ export function useTravels() {
     }
   }, [profile, fetchTravels]);
 
-  // =========================================================================
-  // ✨ RECARREGAR AUTOMATICAMENTE QUANDO A INTERNET VOLTA
-  // =========================================================================
   useEffect(() => {
     const handleSync = () => fetchTravels();
     window.addEventListener('offline_sync_completed', handleSync);
     return () => window.removeEventListener('offline_sync_completed', handleSync);
   }, [fetchTravels]);
 
-  // =========================================================================
-  // ✨ ATUALIZAÇÃO EM TEMPO REAL VIA SOCKET
-  // =========================================================================
   useEffect(() => {
     if (!socket) return;
     socket.on('travel_board_updated', fetchTravels);
-    return () => {
-      socket.off('travel_board_updated', fetchTravels);
-    };
+    return () => socket.off('travel_board_updated', fetchTravels);
   }, [socket, fetchTravels]);
 
   // =========================================================================
-  // 2. MUTAÇÕES COM SUPORTE OFFLINE E ATUALIZAÇÃO OTIMISTA
+  // 2. MUTAÇÕES BLINDADAS COM `updateLocalTravels`
   // =========================================================================
 
   const createTravel = async (title: string, description: string, priority?: string, checklists?: any[], tags?: any[], imageUrl?: string, dueDate?: Date, listId?: string) => {
-    // 🚀 OTIMISTA: Cria um ID temporário e mostra o cartão na tela imediatamente!
     const tempId = crypto.randomUUID ? crypto.randomUUID() : `temp-${Date.now()}`;
+    // ✨ CORREÇÃO DA COLUNA: Agora vai para o 'list-todo' para não desaparecer do quadro!
     const newTravel: any = {
-      id: tempId,
-      title, description, priority, checklists, tags, imageUrl, dueDate, 
-      listId: listId || 'Pendente',
-      status: listId || 'Pendente',
-      created_by: profile?.id,
-      technicians: []
+      id: tempId, title, description, priority, checklists, tags, imageUrl, dueDate, 
+      listId: listId || 'list-todo', status: listId || 'list-todo', created_by: profile?.id, technicians: []
     };
 
-    setTravels(prev => [...prev, newTravel]);
+    updateLocalTravels(prev => [...prev, newTravel]);
 
     try {
       const payload = { title, description, priority, checklists, tags, imageUrl, dueDate, listId };
-      // ✨ CORREÇÃO AQUI: Passamos o tempId para o cofre, para que o Tradutor Mágico saiba quem ele é!
       const res = await apiWithOfflineFallback('POST', '/travels', payload, 'geral', tempId);
       
-      if (res.offline) {
-        toast.info('Viagem guardada offline. Será criada assim que a internet voltar!');
-      } else {
-        toast.success('Viagem criada com sucesso!');
-        fetchTravels(); // Só vai buscar ao servidor se tiver internet
-      }
+      if (res.offline) toast.info('Viagem guardada offline. Será enviada quando a net voltar!');
+      else { toast.success('Viagem criada com sucesso!'); fetchTravels(); }
     } catch (error) {
       toast.error('Erro ao criar a viagem.');
-      setTravels(prev => prev.filter(t => t.id !== tempId)); // Reverte visualmente se der erro
+      updateLocalTravels(prev => prev.filter(t => t.id !== tempId)); 
     }
   };
 
   const updateTravel = async (id: string, updates: Partial<Travel>) => {
-    // 🚀 OTIMISTA: Atualiza o texto na tela imediatamente
-    setTravels(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t));
+    updateLocalTravels(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t));
 
     try {
       const res = await apiWithOfflineFallback('PUT', `/travels/${id}`, updates, 'geral', id);
-      if (res.offline) {
-        toast.info('Atualizações guardadas offline.');
-      } else {
-        fetchTravels(); // Só atualiza a lista se estiver online
-      }
+      if (res.offline) toast.info('Atualizações guardadas offline.');
+      else fetchTravels(); 
     } catch (error) {
-      toast.error('Erro ao atualizar a viagem.');
-      fetchTravels(); // Reverte
+      fetchTravels(); 
     }
   };
 
   const deleteTravel = async (id: string) => {
-    // 🚀 OTIMISTA: Remove o cartão da tela imediatamente
-    setTravels(prev => prev.filter(t => t.id !== id));
+    updateLocalTravels(prev => prev.filter(t => t.id !== id));
 
     try {
       const res = await apiWithOfflineFallback('DELETE', `/travels/${id}`, {}, 'geral', id);
-      if (res.offline) {
-        toast.info('Eliminação agendada (Modo Offline).');
-      } else {
-        toast.success('Viagem excluída com sucesso.');
-        fetchTravels();
-      }
+      if (res.offline) toast.info('Eliminação agendada (Modo Offline).');
+      else { toast.success('Viagem excluída com sucesso.'); fetchTravels(); }
     } catch (error) {
-      toast.error('Erro ao excluir a viagem.');
-      fetchTravels(); // Reverte
+      fetchTravels(); 
     }
   };
 
   const updateTravelStatus = async (id: string, newStatus: string) => {
-    // 🚀 OTIMISTA: Move o cartão na hora na tela!
-    setTravels(prev => prev.map(t => t.id === id ? { ...t, status: newStatus, listId: newStatus } : t));
+    updateLocalTravels(prev => prev.map(t => t.id === id ? { ...t, status: newStatus, listId: newStatus } : t));
     
     try {
       const res = await apiWithOfflineFallback('PUT', `/travels/${id}/status`, { status: newStatus }, 'geral', id);
       if (res.offline) toast.warning('Sem internet: Movimento guardado no dispositivo.');
     } catch (error) {
-      toast.error('Erro ao mover a viagem. A reverter...');
-      fetchTravels(); // Reverte visualmente caso dê erro no servidor
+      fetchTravels(); 
     }
   };
 
   const assignTraveler = async (travelId: string, userId: string) => {
+    updateLocalTravels(prev => prev.map(t => {
+      if (t.id === travelId) {
+         const exists = t.technicians?.some((tech: any) => String(tech.user_id) === String(userId));
+         if (!exists) return { ...t, technicians: [...(t.technicians || []), { user_id: userId, travel_id: travelId }] };
+      }
+      return t;
+    }));
+
     try {
       const res = await apiWithOfflineFallback('POST', `/travels/${travelId}/technicians`, { user_id: userId }, 'geral', travelId);
       if (res.offline) toast.info('Atribuição guardada offline.');
-      if (!res.offline) fetchTravels(); // Evita recarregar a tela atoa se estiver offline
+      if (!res.offline) fetchTravels();
     } catch (error) {
       toast.error('Erro ao adicionar o viajante.');
     }
   };
 
   const removeTraveler = async (travelId: string, userId: string) => {
+    updateLocalTravels(prev => prev.map(t => {
+      if (t.id === travelId) return { ...t, technicians: t.technicians?.filter((tech: any) => String(tech.user_id) !== String(userId)) };
+      return t;
+    }));
+
     try {
       const res = await apiWithOfflineFallback('DELETE', `/travels/${travelId}/technicians/${userId}`, {}, 'geral', travelId);
       if (res.offline) toast.info('Remoção guardada offline.');
@@ -195,8 +217,7 @@ export function useTravels() {
   };
 
   const toggleChecklistItem = async (travelId: string, itemId: string, groupId: string) => {
-    // 🚀 OTIMISTA: Assinala como feito instantaneamente!
-    setTravels(prev => prev.map(t => {
+    updateLocalTravels(prev => prev.map(t => {
       if (t.id === travelId) {
         const newChecklists = t.checklists?.map((g: any) => {
           if (g.id === groupId) {
@@ -214,65 +235,63 @@ export function useTravels() {
       if (res.offline) toast.info('Tarefa guardada localmente!');
     } catch (error) {
       toast.error('Erro ao sincronizar a tarefa.');
-      fetchTravels(); // Reverte
+      fetchTravels(); 
     }
   };
 
   // =========================================================================
-  // 3. RELÓGIO DE PONTO (COM RETORNO FANTASMA OFFLINE)
+  // 3. RELÓGIO DE PONTO 
   // =========================================================================
 
   const clockIn = async (travelId: string, location?: {lat: number, lng: number}) => {
+    const tempLog = { id: 'offline-log-in', travel_id: travelId, user_id: profile?.id, check_in: new Date().toISOString(), check_in_lat: location?.lat, check_in_lng: location?.lng };
+    
+    updateLocalTravels(prev => prev.map(t => {
+       if (t.id === travelId) return { ...t, time_logs: [...(t.time_logs || []), tempLog] };
+       return t;
+    }));
+
     try {
       const res = await apiWithOfflineFallback('POST', `/travels/${travelId}/checkin`, location, 'ponto', travelId);
-      
       if (res.offline) {
          toast.success('Ponto de Entrada guardado no Modo Offline!');
-         // Retornar um "fantasma" para o Modal atualizar logo na hora
-         return { id: 'offline-log-in', travel_id: travelId, user_id: profile?.id, check_in: new Date().toISOString(), check_in_lat: location?.lat, check_in_lng: location?.lng };
+         return tempLog;
       }
-      
       toast.success('Entrada registada com sucesso!');
       fetchTravels();
       return res.data; 
     } catch (error) {
-      toast.error('Erro ao registar entrada.');
       throw error; 
     }
   };
 
   const clockOut = async (travelId: string, location?: {lat: number, lng: number}) => {
+    const tempOutTime = new Date().toISOString();
+
+    updateLocalTravels(prev => prev.map(t => {
+       if (t.id === travelId) {
+          return { ...t, time_logs: t.time_logs?.map((l: any) => (!l.check_out && String(l.user_id) === String(profile?.id)) ? { ...l, check_out: tempOutTime } : l) };
+       }
+       return t;
+    }));
+
     try {
       const res = await apiWithOfflineFallback('POST', `/travels/${travelId}/checkout`, location, 'ponto', travelId);
-      
       if (res.offline) {
          toast.success('Ponto de Saída guardado no Modo Offline!');
-         return { id: 'offline-log-out', travel_id: travelId, user_id: profile?.id, check_out: new Date().toISOString() };
+         return { id: 'offline-log-out', travel_id: travelId, user_id: profile?.id, check_out: tempOutTime };
       }
-      
       toast.success('Saída registada com sucesso!');
       fetchTravels();
       return res.data; 
     } catch (error: any) {
-      toast.error(error.response?.data?.error || 'Erro ao registar saída.');
       throw error; 
     }
   };
 
   return { 
-    travels, 
-    loading, 
-    fetchTravels, 
-    createTravel,
-    updateTravel,
-    deleteTravel,
-    updateTravelStatus, 
-    assignTraveler, 
-    removeTraveler,
-    toggleChecklistItem, 
-    clockIn,
-    clockOut,
-    isAdminOrLeader, 
-    userId: profile?.id
+    travels, loading, fetchTravels, createTravel, updateTravel, deleteTravel,
+    updateTravelStatus, assignTraveler, removeTraveler, toggleChecklistItem, 
+    clockIn, clockOut, isAdminOrLeader, userId: profile?.id
   };
 }
