@@ -23,16 +23,41 @@ export function useOfflineSync() {
       // ✨ NOVIDADE: Organiza por ordem de criação (muito importante para não atropelar a ordem cronológica)
       actions.sort((a, b) => a.createdAt - b.createdAt);
 
+      // ✨ O TRADUTOR DE IDs MÁGICO ✨
+      // Vai mapear os IDs fantasmas (temp-...) para os IDs reais gerados pela base de dados
+      const idMap: Record<string, string> = {};
+
       // 3. Vamos tentar enviar cada ação pendente para o backend
       for (const action of actions) {
         try {
+          // Substituir IDs temporários pelos reais no URL e no Body (se existirem no dicionário)
+          let url = action.url;
+          let body = action.body;
+
+          for (const [tempId, realId] of Object.entries(idMap)) {
+            // Troca no URL (ex: /travels/temp-123 vira /travels/55)
+            url = url.replace(tempId, realId);
+            
+            // Troca no Body se for preciso (ex: caso um checklist tenha o ID guardado no corpo do pedido)
+            if (body) {
+              const bodyString = JSON.stringify(body).replace(new RegExp(tempId, 'g'), realId);
+              body = JSON.parse(bodyString);
+            }
+          }
+
+          let res;
           if (action.method === 'POST') {
-            await api.post(action.url, action.body);
+            res = await api.post(url, body);
+            
+            // ✨ Se criámos algo e o servidor devolveu um ID real, guardamos no dicionário!
+            if (res.data?.id && action.travelId && action.travelId.startsWith('temp-')) {
+              idMap[action.travelId] = String(res.data.id);
+            }
           } else if (action.method === 'PUT') {
-            await api.put(action.url, action.body);
+            await api.put(url, body);
           } else if (action.method === 'DELETE') {
             // ✨ NOVIDADE: Adicionado suporte para DELETE
-            await api.delete(action.url, { data: action.body });
+            await api.delete(url, { data: body });
           }
           
           // 4. Se o envio foi um sucesso, apagamos a ação do cofre
