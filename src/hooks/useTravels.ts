@@ -111,7 +111,8 @@ export function useTravels() {
 
     try {
       const payload = { title, description, priority, checklists, tags, imageUrl, dueDate, listId };
-      const res = await apiWithOfflineFallback('POST', '/travels', payload, 'geral', 'nova');
+      // ✨ CORREÇÃO AQUI: Passamos o tempId para o cofre, para que o Tradutor Mágico saiba quem ele é!
+      const res = await apiWithOfflineFallback('POST', '/travels', payload, 'geral', tempId);
       
       if (res.offline) {
         toast.info('Viagem guardada offline. Será criada assim que a internet voltar!');
